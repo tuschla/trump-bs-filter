@@ -1,1 +1,1 @@
-# non-violent-trump
+# Automated BS filter for Trump Truth Social posts
