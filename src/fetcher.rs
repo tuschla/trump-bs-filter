@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use scraper::{Html, Selector};
+use tracing::info;
+
+use crate::storage::Storage;
 
 pub struct Truth {
     pub id: String,
@@ -47,6 +51,139 @@ pub async fn fetch_truths(client: &reqwest::Client, feed_url: &str) -> Result<Ve
         .collect();
 
     Ok(truths)
+}
+
+const BASE_URL: &str = "https://trumpstruth.org";
+
+pub async fn backfill(client: &reqwest::Client, storage: &Storage) -> Result<u64> {
+    let status_sel = Selector::parse(".status").unwrap();
+    let content_sel = Selector::parse(".status__content").unwrap();
+    let meta_sel = Selector::parse(".status-info__meta-item").unwrap();
+    let link_sel = Selector::parse(".status__external-link").unwrap();
+
+    let mut cursor: Option<String> = None;
+    let mut total = 0u64;
+
+    loop {
+        let mut url = format!("{BASE_URL}?sort=asc&per_page=50");
+        if let Some(ref c) = cursor {
+            url.push_str(&format!("&cursor={c}"));
+        }
+
+        let html = client
+            .get(&url)
+            .send()
+            .await
+            .context("failed to fetch archive page")?
+            .text()
+            .await
+            .context("failed to read archive page")?;
+
+        let doc = Html::parse_document(&html);
+        let statuses: Vec<_> = doc.select(&status_sel).collect();
+
+        if statuses.is_empty() {
+            break;
+        }
+
+        for status in &statuses {
+            let (id, post_url) = match extract_post_id(status, &meta_sel) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if storage.truth_exists(&id).await? {
+                continue;
+            }
+
+            let content = status
+                .select(&content_sel)
+                .next()
+                .map(|el| {
+                    let raw = el.inner_html();
+                    let decoded = html_escape::decode_html_entities(&raw).into_owned();
+                    strip_html_tags(&decoded)
+                })
+                .unwrap_or_default();
+
+            if content.is_empty() {
+                continue;
+            }
+
+            let published = extract_date(status, &meta_sel);
+            let source_url = status
+                .select(&link_sel)
+                .next()
+                .and_then(|el| el.value().attr("href"))
+                .map(|s| s.to_string())
+                .or(Some(post_url));
+
+            let published_str = published.map(|d| d.to_rfc3339());
+            storage
+                .insert_truth(
+                    &id,
+                    &content,
+                    source_url.as_deref(),
+                    published_str.as_deref(),
+                )
+                .await?;
+            total += 1;
+        }
+
+        info!("backfill: fetched page, {total} new truths so far");
+
+        cursor = extract_next_cursor(&html);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(total)
+}
+
+fn extract_post_id(
+    status: &scraper::ElementRef,
+    meta_sel: &Selector,
+) -> Option<(String, String)> {
+    for el in status.select(meta_sel) {
+        if let Some(href) = el.value().attr("href") {
+            if href.contains("/statuses/") {
+                let url = if href.starts_with("http") {
+                    href.to_string()
+                } else {
+                    format!("{BASE_URL}{href}")
+                };
+                return Some((url.clone(), url));
+            }
+        }
+    }
+    None
+}
+
+fn extract_date(
+    status: &scraper::ElementRef,
+    meta_sel: &Selector,
+) -> Option<DateTime<Utc>> {
+    for el in status.select(meta_sel) {
+        let text = el.text().collect::<String>();
+        if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%B %e, %Y, %l:%M %p") {
+            return Some(dt.and_utc());
+        }
+    }
+    None
+}
+
+fn extract_next_cursor(html: &str) -> Option<String> {
+    let marker = "cursor=";
+    let mut last_cursor = None;
+    for segment in html.split(marker).skip(1) {
+        let end = segment.find(|c: char| c == '"' || c == '&' || c == '\'').unwrap_or(segment.len());
+        let cursor = &segment[..end];
+        if !cursor.is_empty() {
+            last_cursor = Some(cursor.to_string());
+        }
+    }
+    last_cursor
 }
 
 fn strip_html_tags(input: &str) -> String {

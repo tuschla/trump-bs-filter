@@ -44,8 +44,12 @@ impl super::Publisher for BlueskyPublisher {
         &self,
         text: &str,
         source_url: Option<&str>,
+        original_timestamp: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let status = super::format_post(text, source_url);
+        let timestamp = original_timestamp
+            .and_then(|ts| ts.parse::<Datetime>().ok())
+            .unwrap_or_else(Datetime::now);
         Box::pin(async move {
             let chunks = super::split_into_chunks(&status, BLUESKY_CHAR_LIMIT);
             let mut root_ref: Option<(String, atrium_api::types::string::Cid)> = None;
@@ -72,7 +76,7 @@ impl super::Publisher for BlueskyPublisher {
                 let response = self
                     .agent
                     .create_record(RecordData {
-                        created_at: Datetime::now(),
+                        created_at: timestamp.clone(),
                         text: chunk.clone(),
                         embed: None,
                         entities: None,
