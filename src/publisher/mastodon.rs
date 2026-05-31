@@ -42,6 +42,7 @@ impl super::Publisher for MastodonPublisher {
         &self,
         text: &str,
         source_url: Option<&str>,
+        _original_timestamp: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let full_text = super::format_post(text, source_url);
         let char_limit = self.char_limit;
