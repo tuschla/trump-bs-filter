@@ -1,0 +1,21 @@
+[feed]
+url = "https://trumpstruth.org/feed"
+poll_interval_secs = 300
+
+[storage]
+db_path = "/data/truths.db"
+
+[prompts]
+dir = "prompts"
+# Leave empty to run all pipelines found in prompts dir.
+# Or specify which ones to run:
+# active = ["nvc_mister_rogers", "therapist", "five_year_old", "no_bs"]
+
+# Optional: uncomment and fill in to publish
+# [publishers.mastodon]
+# instance_url = "https://mastodon.social"
+# access_token = "your-token-here"
+
+# [publishers.bluesky]
+# handle = "your-handle.bsky.social"
+# password = "your-app-password"
