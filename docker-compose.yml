@@ -1,0 +1,11 @@
+services:
+  non-violent-trump:
+    build: .
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./prompts:/app/prompts:ro
+      - ./data:/data
+    environment:
+      - RUST_LOG=non_violent_trump=info
+    command: ["daemon", "--config", "/app/config.toml"]
+    restart: unless-stopped
