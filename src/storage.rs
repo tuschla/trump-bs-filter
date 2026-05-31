@@ -13,10 +13,18 @@ pub struct PastRewrite {
 }
 
 #[derive(sqlx::FromRow)]
+pub struct UntransformedTruth {
+    pub id: String,
+    pub content: String,
+    pub published: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
 pub struct UnpublishedRewrite {
     pub truth_id: String,
     pub content: String,
     pub source_url: Option<String>,
+    pub original_published: Option<String>,
 }
 
 impl Storage {
@@ -138,13 +146,29 @@ impl Storage {
         Ok(rows)
     }
 
+    pub async fn get_untransformed(&self, style: &str) -> Result<Vec<UntransformedTruth>> {
+        let rows = sqlx::query_as::<_, UntransformedTruth>(
+            "SELECT t.id, t.content, t.published \
+             FROM truths t \
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM rewrites r
+                 WHERE r.truth_id = t.id AND r.style = ?
+             ) \
+             ORDER BY t.published ASC",
+        )
+        .bind(style)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn get_unpublished(
         &self,
         style: &str,
         platform: &str,
     ) -> Result<Vec<UnpublishedRewrite>> {
         let rows = sqlx::query_as::<_, UnpublishedRewrite>(
-            "SELECT r.truth_id, r.content, t.url as source_url \
+            "SELECT r.truth_id, r.content, t.url as source_url, t.published as original_published \
              FROM rewrites r \
              JOIN truths t ON r.truth_id = t.id \
              WHERE r.style = ? \

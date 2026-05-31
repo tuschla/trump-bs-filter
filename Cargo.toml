@@ -10,6 +10,8 @@ bsky-sdk = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 feed-rs = "2"
+futures = "0.3"
+scraper = "0.22"
 html-escape = "0.2"
 megalodon = "1"
 reqwest = { version = "0.12", features = ["json"] }

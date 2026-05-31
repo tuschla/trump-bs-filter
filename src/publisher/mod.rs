@@ -12,6 +12,7 @@ pub trait Publisher: Send + Sync {
         &self,
         text: &str,
         source_url: Option<&str>,
+        original_timestamp: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 }
 

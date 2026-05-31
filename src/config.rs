@@ -9,6 +9,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub prompts: PromptsConfig,
     #[serde(default)]
+    pub transform: TransformConfig,
+    #[serde(default)]
     pub publishers: PublishersConfig,
 }
 
@@ -38,6 +40,22 @@ pub struct PromptsConfig {
 
 fn default_prompts_dir() -> String {
     "prompts".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransformConfig {
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+impl Default for TransformConfig {
+    fn default() -> Self {
+        Self { concurrency: default_concurrency() }
+    }
+}
+
+fn default_concurrency() -> usize {
+    50
 }
 
 #[derive(Debug, Default, Deserialize)]

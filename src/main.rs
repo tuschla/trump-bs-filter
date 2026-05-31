@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use futures::stream::{self, StreamExt};
 use tracing::{error, info};
 
 use publisher::Publisher;
@@ -27,14 +28,20 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Fetch, transform, and publish once
-    Once,
-    /// Run continuously, polling at the configured interval
-    Daemon,
-    /// Fetch and transform once without publishing
-    DryRun,
+    /// Fetch latest truths from RSS into DB
+    Fetch,
+    /// Scrape full archive into DB
+    Backfill,
+    /// Transform all untransformed truths
+    Transform,
     /// Publish all unpublished rewrites
     Publish,
+    /// Fetch + transform + publish once
+    Once,
+    /// Run continuously
+    Daemon,
+    /// Fetch + transform without publishing
+    DryRun,
 }
 
 #[tokio::main]
@@ -69,8 +76,23 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
+        Command::Fetch => {
+            fetch(&http, &config, &storage).await?;
+        }
+        Command::Backfill => {
+            let count = fetcher::backfill(&http, &storage).await?;
+            info!("backfill complete: {count} new truths");
+        }
+        Command::Transform => {
+            transform(&config, &storage, &pipelines).await?;
+        }
+        Command::Publish => {
+            let publishers = create_publishers(&config).await?;
+            publish_pending(&storage, &pipelines, &publishers).await?;
+        }
         Command::Once => {
-            fetch_and_transform(&http, &config, &storage, &pipelines).await?;
+            fetch(&http, &config, &storage).await?;
+            transform(&config, &storage, &pipelines).await?;
             let publishers = create_publishers(&config).await?;
             publish_pending(&storage, &pipelines, &publishers).await?;
         }
@@ -79,32 +101,31 @@ async fn main() -> Result<()> {
             let publishers = create_publishers(&config).await?;
             info!("starting daemon, polling every {}s", interval.as_secs());
             loop {
-                if let Err(e) = fetch_and_transform(&http, &config, &storage, &pipelines).await {
-                    error!("fetch/transform cycle failed: {e:#}");
+                if let Err(e) = fetch(&http, &config, &storage).await {
+                    error!("fetch failed: {e:#}");
+                }
+                if let Err(e) = transform(&config, &storage, &pipelines).await {
+                    error!("transform failed: {e:#}");
                 }
                 if let Err(e) = publish_pending(&storage, &pipelines, &publishers).await {
-                    error!("publish cycle failed: {e:#}");
+                    error!("publish failed: {e:#}");
                 }
                 tokio::time::sleep(interval).await;
             }
         }
         Command::DryRun => {
-            fetch_and_transform(&http, &config, &storage, &pipelines).await?;
-        }
-        Command::Publish => {
-            let publishers = create_publishers(&config).await?;
-            publish_pending(&storage, &pipelines, &publishers).await?;
+            fetch(&http, &config, &storage).await?;
+            transform(&config, &storage, &pipelines).await?;
         }
     }
 
     Ok(())
 }
 
-async fn fetch_and_transform(
+async fn fetch(
     http: &reqwest::Client,
     config: &config::Config,
     storage: &storage::Storage,
-    pipelines: &[&Pipeline],
 ) -> Result<()> {
     let truths = fetcher::fetch_truths(http, &config.feed.url).await?;
     info!("fetched {} truths from feed", truths.len());
@@ -124,26 +145,68 @@ async fn fetch_and_transform(
             )
             .await?;
         info!("stored new truth: {}", truth.id);
+    }
 
-        for pipeline in pipelines {
-            let memory = storage
-                .get_recent_rewrites(&pipeline.name, transformer::MEMORY_EXAMPLE_COUNT)
-                .await?;
-            match pipeline.run(&truth.content, &memory).await {
-                Ok(rewritten) => {
-                    storage
-                        .insert_rewrite(&truth.id, &pipeline.name, &rewritten)
-                        .await?;
-                    info!("transformed [{}]: {}", pipeline.name, truth.id);
-                }
-                Err(e) => {
-                    error!(
-                        "transform [{}] failed for {}: {e:#}",
-                        pipeline.name, truth.id
-                    );
+    Ok(())
+}
+
+async fn transform(
+    config: &config::Config,
+    storage: &storage::Storage,
+    pipelines: &[&Pipeline],
+) -> Result<()> {
+    let concurrency = config.transform.concurrency;
+
+    for pipeline in pipelines {
+        let untransformed = storage.get_untransformed(&pipeline.name).await?;
+        if untransformed.is_empty() {
+            info!("[{}] nothing to transform", pipeline.name);
+            continue;
+        }
+
+        info!(
+            "[{}] transforming {} truths (concurrency: {})",
+            pipeline.name,
+            untransformed.len(),
+            concurrency
+        );
+
+        let results: Vec<_> = stream::iter(untransformed.iter().map(|truth| {
+            let pipeline_name = &pipeline.name;
+            async move {
+                let memory = storage
+                    .get_recent_rewrites(pipeline_name, transformer::MEMORY_EXAMPLE_COUNT)
+                    .await;
+                let memory = match memory {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("[{pipeline_name}] failed to get memory for {}: {e:#}", truth.id);
+                        return;
+                    }
+                };
+
+                match pipeline.run(&truth.content, &memory).await {
+                    Ok(rewritten) => {
+                        if let Err(e) = storage
+                            .insert_rewrite(&truth.id, pipeline_name, &rewritten)
+                            .await
+                        {
+                            error!("[{pipeline_name}] failed to store rewrite for {}: {e:#}", truth.id);
+                        } else {
+                            info!("transformed [{pipeline_name}]: {}", truth.id);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[{pipeline_name}] transform failed for {}: {e:#}", truth.id);
+                    }
                 }
             }
-        }
+        }))
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+        let _ = results;
     }
 
     Ok(())
@@ -183,7 +246,11 @@ async fn publish_pending(
                 .await?;
             for rewrite in &unpublished {
                 match p
-                    .publish(&rewrite.content, rewrite.source_url.as_deref())
+                    .publish(
+                        &rewrite.content,
+                        rewrite.source_url.as_deref(),
+                        rewrite.original_published.as_deref(),
+                    )
                     .await
                 {
                     Ok(()) => {
