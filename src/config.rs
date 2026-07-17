@@ -68,6 +68,18 @@ pub struct PublishersConfig {
 pub struct MastodonConfig {
     pub instance_url: String,
     pub access_token: String,
+    /// Max posts per daemon cycle. Mastodon can't backdate, so the historical
+    /// backlog must be drip-fed instead of dumped. Defaults to 1.
+    #[serde(default = "default_mastodon_max_per_run")]
+    pub max_per_run: usize,
+    /// Minimum seconds between Mastodon posts, independent of poll interval.
+    /// 0 = no interval gate (rate limited by max_per_run + poll cadence only).
+    #[serde(default)]
+    pub min_interval_secs: u64,
+}
+
+fn default_mastodon_max_per_run() -> usize {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +88,14 @@ pub struct BlueskyConfig {
     pub password: String,
     #[serde(default = "default_bluesky_url")]
     pub pds_url: String,
+    /// Max posts per daemon cycle. Bluesky backdates correctly, so the timeline
+    /// is fine at any rate — but a fresh account creating thousands of records
+    /// fast trips spam heuristics and hits create rate limits. None = unlimited.
+    #[serde(default)]
+    pub max_per_run: Option<usize>,
+    /// Minimum seconds between posts. 0 = no interval gate.
+    #[serde(default)]
+    pub min_interval_secs: u64,
 }
 
 fn default_bluesky_url() -> String {

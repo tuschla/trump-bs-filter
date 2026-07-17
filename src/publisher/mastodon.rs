@@ -10,6 +10,8 @@ use crate::config::MastodonConfig;
 pub struct MastodonPublisher {
     client: Box<dyn Megalodon + Send + Sync>,
     char_limit: usize,
+    max_per_run: usize,
+    min_interval_secs: u64,
 }
 
 impl MastodonPublisher {
@@ -29,13 +31,26 @@ impl MastodonPublisher {
 
         let char_limit = instance.json.configuration.statuses.max_characters as usize;
 
-        Ok(Self { client, char_limit })
+        Ok(Self {
+            client,
+            char_limit,
+            max_per_run: config.max_per_run,
+            min_interval_secs: config.min_interval_secs,
+        })
     }
 }
 
 impl super::Publisher for MastodonPublisher {
     fn platform(&self) -> &str {
         "mastodon"
+    }
+
+    fn max_per_run(&self) -> Option<usize> {
+        Some(self.max_per_run)
+    }
+
+    fn min_interval_secs(&self) -> u64 {
+        self.min_interval_secs
     }
 
     fn publish(

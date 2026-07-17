@@ -182,6 +182,17 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Most recent publication time for a platform (UTC "YYYY-MM-DD HH:MM:SS"),
+    /// or None if nothing has been published there yet. Used to rate limit.
+    pub async fn last_published_at(&self, platform: &str) -> Result<Option<String>> {
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT MAX(published_at) FROM publications WHERE platform = ?")
+                .bind(platform)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
+    }
+
     pub async fn get_unpublished(
         &self,
         style: &str,
