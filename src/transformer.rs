@@ -13,7 +13,53 @@ pub const MEMORY_EXAMPLE_COUNT: i64 = 3;
 #[derive(Debug, Deserialize)]
 pub struct Pipeline {
     pub name: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// Pipelines that cite sources (e.g. no_bs) keep URLs; everything else has
+    /// URLs and em/en dashes stripped from the final output.
+    #[serde(default)]
+    pub keep_urls: bool,
     pub stages: Vec<Stage>,
+}
+
+/// Remove em/en dashes and raw URLs from rewrite output. Em dashes are a strong
+/// "AI wrote this" tell; URLs have no place in a styled rewrite. Deterministic
+/// so it cannot regress no matter what the model emits.
+pub fn sanitize_output(text: &str) -> String {
+    let dashed = text
+        .replace('—', " ")
+        .replace('–', " ")
+        .replace('―', " ");
+
+    let kept: Vec<String> = dashed
+        .split_whitespace()
+        .filter_map(|w| {
+            let core = w.trim_matches(|c: char| !c.is_alphanumeric());
+            if core.starts_with("http://") || core.starts_with("https://") {
+                return None;
+            }
+            // URL glued to preceding text, e.g. "LIVE!https://..." — keep the prefix.
+            match w.find("http://").or_else(|| w.find("https://")) {
+                Some(i) => {
+                    let prefix = w[..i].trim_end_matches(|c: char| !c.is_alphanumeric());
+                    (!prefix.is_empty()).then(|| prefix.to_string())
+                }
+                None => Some(w.to_string()),
+            }
+        })
+        .collect();
+
+    kept.join(" ")
+        .replace(" .", ".")
+        .replace(" ,", ",")
+        .replace(" !", "!")
+        .replace(" ?", "?")
+        .trim()
+        .to_string()
+}
+
+fn default_model() -> String {
+    "claude-opus-4-6".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +102,7 @@ impl Pipeline {
                 let mut retries = 0;
                 loop {
                     let user_message = build_message(original_post, &stage_outputs, memory);
-                    let audit_result = claude::call(&stage.prompt, &user_message, stage.web_search).await?;
+                    let audit_result = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model).await?;
 
                     if audit_result.trim() == "PASS" {
                         info!("[{}] audit passed for stage '{}'", self.name, audited_stage_name);
@@ -88,6 +134,7 @@ impl Pipeline {
                         &audited_stage.prompt,
                         &retry_message,
                         audited_stage.web_search,
+                        &self.model,
                     )
                     .await?;
 
@@ -97,7 +144,7 @@ impl Pipeline {
                 }
             } else {
                 let user_message = build_message(original_post, &stage_outputs, memory);
-                let output = claude::call(&stage.prompt, &user_message, stage.web_search).await?;
+                let output = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model).await?;
                 info!("[{}] completed stage '{}'", self.name, stage.name);
                 stage_outputs.push((&stage.name, output));
             }
@@ -109,6 +156,11 @@ impl Pipeline {
             .unwrap_or_default();
 
         let final_output = validate_urls(&final_output).await;
+        let final_output = if self.keep_urls {
+            final_output
+        } else {
+            sanitize_output(&final_output)
+        };
 
         Ok(final_output)
     }

@@ -146,6 +146,24 @@ impl Storage {
         Ok(rows)
     }
 
+    pub async fn get_rewrites_by_style(&self, style: &str) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, content FROM rewrites WHERE style = ?")
+                .bind(style)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    pub async fn update_rewrite_content(&self, id: i64, content: &str) -> Result<()> {
+        sqlx::query("UPDATE rewrites SET content = ? WHERE id = ?")
+            .bind(content)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_untransformed(&self, style: &str) -> Result<Vec<UntransformedTruth>> {
         let rows = sqlx::query_as::<_, UntransformedTruth>(
             "SELECT t.id, t.content, t.published \
@@ -154,6 +172,8 @@ impl Storage {
                  SELECT 1 FROM rewrites r
                  WHERE r.truth_id = t.id AND r.style = ?
              ) \
+             AND TRIM(t.content) != '' \
+             AND NOT (TRIM(t.content) GLOB 'http*' AND INSTR(TRIM(t.content), ' ') = 0) \
              ORDER BY t.published ASC",
         )
         .bind(style)

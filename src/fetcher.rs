@@ -86,6 +86,8 @@ pub async fn backfill(client: &reqwest::Client, storage: &Storage) -> Result<u64
             break;
         }
 
+        let mut page_new = 0u64;
+
         for status in &statuses {
             let (id, post_url) = match extract_post_id(status, &meta_sel) {
                 Some(v) => v,
@@ -127,18 +129,118 @@ pub async fn backfill(client: &reqwest::Client, storage: &Storage) -> Result<u64
                     published_str.as_deref(),
                 )
                 .await?;
+            page_new += 1;
             total += 1;
         }
 
-        info!("backfill: fetched page, {total} new truths so far");
+        info!("backfill: fetched page ({page_new} new), {total} total new truths");
 
-        cursor = extract_next_cursor(&html);
-        if cursor.is_none() {
-            break;
+        let next_cursor = extract_next_cursor(&html);
+        match next_cursor {
+            Some(ref c) if Some(c) != cursor.as_ref() => cursor = next_cursor,
+            _ => break,
         }
     }
 
     Ok(total)
+}
+
+/// Recover truths missing from the DB by fetching individual status pages.
+/// Backfill scrapes listing pages and silently drops some posts (e.g. retruths
+/// whose body renders empty on the listing). This walks the recent id range and
+/// fetches each missing status page directly, which always carries the content.
+pub async fn recover_missing(
+    client: &reqwest::Client,
+    storage: &Storage,
+    window: i64,
+) -> Result<u64> {
+    let content_sel = Selector::parse(".status__content").unwrap();
+    let meta_sel = Selector::parse(".status-info__meta-item").unwrap();
+    let link_sel = Selector::parse(".status__external-link").unwrap();
+
+    let listing = client
+        .get(format!("{BASE_URL}/?sort=desc&per_page=20"))
+        .send()
+        .await
+        .context("failed to fetch listing for newest id")?
+        .text()
+        .await
+        .context("failed to read listing body")?;
+    let newest = extract_max_status_id(&listing)
+        .context("could not determine newest status id from listing")?;
+    let lo = (newest - window).max(1);
+    info!("recover: scanning statuses {lo}..={newest}");
+
+    let mut recovered = 0u64;
+    for n in lo..=newest {
+        let id = format!("{BASE_URL}/statuses/{n}");
+        if storage.truth_exists(&id).await? {
+            continue;
+        }
+
+        let html = match client.get(&id).send().await {
+            Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+            _ => continue,
+        };
+        let doc = Html::parse_document(&html);
+
+        let mut content = doc
+            .select(&content_sel)
+            .next()
+            .map(|el| {
+                let decoded = html_escape::decode_html_entities(&el.inner_html()).into_owned();
+                strip_html_tags(&decoded)
+            })
+            .unwrap_or_default();
+
+        let link = doc
+            .select(&link_sel)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .map(|s| s.to_string());
+
+        if content.is_empty() {
+            match &link {
+                Some(l) => content = l.clone(),
+                None => continue,
+            }
+        }
+
+        let published = extract_date_doc(&doc, &meta_sel).map(|d| d.to_rfc3339());
+        let source_url = link.or_else(|| Some(id.clone()));
+
+        storage
+            .insert_truth(&id, &content, source_url.as_deref(), published.as_deref())
+            .await?;
+        recovered += 1;
+        if recovered % 25 == 0 {
+            info!("recover: {recovered} new so far (at id {n})");
+        }
+    }
+
+    info!("recover complete: {recovered} new truths");
+    Ok(recovered)
+}
+
+fn extract_max_status_id(html: &str) -> Option<i64> {
+    let mut max: Option<i64> = None;
+    for seg in html.split("/statuses/").skip(1) {
+        let num: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = num.parse::<i64>() {
+            max = Some(max.map_or(n, |m| m.max(n)));
+        }
+    }
+    max
+}
+
+fn extract_date_doc(doc: &Html, meta_sel: &Selector) -> Option<DateTime<Utc>> {
+    for el in doc.select(meta_sel) {
+        let text = el.text().collect::<String>();
+        if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%B %e, %Y, %l:%M %p") {
+            return Some(dt.and_utc());
+        }
+    }
+    None
 }
 
 fn extract_post_id(
