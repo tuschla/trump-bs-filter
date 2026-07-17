@@ -14,6 +14,8 @@ const BLUESKY_CHAR_LIMIT: usize = 300;
 
 pub struct BlueskyPublisher {
     agent: BskyAgent,
+    max_per_run: Option<usize>,
+    min_interval_secs: u64,
 }
 
 impl BlueskyPublisher {
@@ -31,13 +33,25 @@ impl BlueskyPublisher {
             .login(&config.handle, &config.password)
             .await
             .context("failed to login to Bluesky")?;
-        Ok(Self { agent })
+        Ok(Self {
+            agent,
+            max_per_run: config.max_per_run,
+            min_interval_secs: config.min_interval_secs,
+        })
     }
 }
 
 impl super::Publisher for BlueskyPublisher {
     fn platform(&self) -> &str {
         "bluesky"
+    }
+
+    fn max_per_run(&self) -> Option<usize> {
+        self.max_per_run
+    }
+
+    fn min_interval_secs(&self) -> u64 {
+        self.min_interval_secs
     }
 
     fn publish(
