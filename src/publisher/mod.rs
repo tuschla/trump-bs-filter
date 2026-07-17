@@ -8,6 +8,14 @@ use anyhow::Result;
 
 pub trait Publisher: Send + Sync {
     fn platform(&self) -> &str;
+    /// Max posts per daemon cycle. None = unlimited (safe for backdating platforms).
+    fn max_per_run(&self) -> Option<usize> {
+        None
+    }
+    /// Minimum seconds between posts. 0 = no interval gate.
+    fn min_interval_secs(&self) -> u64 {
+        0
+    }
     fn publish(
         &self,
         text: &str,

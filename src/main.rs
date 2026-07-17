@@ -263,12 +263,32 @@ async fn publish_pending(
     pipelines: &[&Pipeline],
     publishers: &[Box<dyn Publisher>],
 ) -> Result<()> {
-    for pipeline in pipelines {
-        for p in publishers {
+    for p in publishers {
+        let cap = p.max_per_run();
+        let interval = p.min_interval_secs() as i64;
+        let mut posted = 0usize;
+        // Newest publish time for this platform, so rate limiting survives restarts.
+        let mut last = storage.last_published_at(p.platform()).await?;
+
+        'platform: for pipeline in pipelines {
             let unpublished = storage
                 .get_unpublished(&pipeline.name, p.platform())
                 .await?;
             for rewrite in &unpublished {
+                if let Some(c) = cap {
+                    if posted >= c {
+                        break 'platform;
+                    }
+                }
+                if interval > 0 {
+                    if let Some(ref last_ts) = last {
+                        if secs_since(last_ts) < interval {
+                            // Too soon; try again next cycle.
+                            break 'platform;
+                        }
+                    }
+                }
+
                 match p
                     .publish(
                         &rewrite.content,
@@ -281,6 +301,8 @@ async fn publish_pending(
                         storage
                             .mark_published(&rewrite.truth_id, &pipeline.name, p.platform())
                             .await?;
+                        posted += 1;
+                        last = Some(now_utc_string());
                         info!(
                             "published [{}] to {}: {}",
                             pipeline.name,
@@ -302,4 +324,17 @@ async fn publish_pending(
     }
 
     Ok(())
+}
+
+fn now_utc_string() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Seconds since a "YYYY-MM-DD HH:MM:SS" UTC timestamp. Unparseable → i64::MAX
+/// (treat as long ago, so a bad row never blocks publishing forever).
+fn secs_since(ts: &str) -> i64 {
+    match chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        Ok(dt) => (chrono::Utc::now().naive_utc() - dt).num_seconds(),
+        Err(_) => i64::MAX,
+    }
 }
