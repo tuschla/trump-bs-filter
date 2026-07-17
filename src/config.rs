@@ -55,7 +55,7 @@ impl Default for TransformConfig {
 }
 
 fn default_concurrency() -> usize {
-    50
+    5
 }
 
 #[derive(Debug, Default, Deserialize)]

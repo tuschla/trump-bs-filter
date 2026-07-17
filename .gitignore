@@ -2,3 +2,5 @@ target/
 data/
 *.db
 config.toml
+.claude/
+dry_run_results.txt

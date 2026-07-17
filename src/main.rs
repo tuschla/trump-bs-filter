@@ -32,6 +32,10 @@ enum Command {
     Fetch,
     /// Scrape full archive into DB
     Backfill,
+    /// Fetch individual status pages to fill gaps backfill missed
+    Recover,
+    /// Strip em dashes and URLs from existing rewrites (no model calls)
+    Sanitize,
     /// Transform all untransformed truths
     Transform,
     /// Publish all unpublished rewrites
@@ -82,6 +86,26 @@ async fn main() -> Result<()> {
         Command::Backfill => {
             let count = fetcher::backfill(&http, &storage).await?;
             info!("backfill complete: {count} new truths");
+        }
+        Command::Recover => {
+            let count = fetcher::recover_missing(&http, &storage, 5000).await?;
+            info!("recover complete: {count} new truths");
+        }
+        Command::Sanitize => {
+            let mut total = 0u64;
+            for p in &all_pipelines {
+                if p.keep_urls {
+                    continue;
+                }
+                for (id, content) in storage.get_rewrites_by_style(&p.name).await? {
+                    let clean = transformer::sanitize_output(&content);
+                    if clean != content {
+                        storage.update_rewrite_content(id, &clean).await?;
+                        total += 1;
+                    }
+                }
+            }
+            info!("sanitized {total} rewrites");
         }
         Command::Transform => {
             transform(&config, &storage, &pipelines).await?;
