@@ -58,6 +58,74 @@ pub fn sanitize_output(text: &str) -> String {
         .to_string()
 }
 
+/// True if the post has real prose worth rewriting. Retweet markers, bare URLs,
+/// @handles, #hashtags, and punctuation/emoji stubs carry no rewritable words —
+/// feeding them to the model makes it break character ("No text to rewrite...").
+pub fn content_is_rewritable(content: &str) -> bool {
+    let text = strip_html_tags(content);
+    for raw in text.split_whitespace() {
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            continue;
+        }
+        if raw.starts_with('#') || raw.starts_with('@') {
+            continue;
+        }
+        let core = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if core.is_empty() {
+            continue;
+        }
+        let lower = core.to_lowercase();
+        if lower == "rt" || lower == "http" || lower == "https" {
+            continue;
+        }
+        // A single real word is enough for a kid-voice rewrite.
+        return true;
+    }
+    false
+}
+
+/// True if a rewrite reads as the model talking to us instead of rewriting the
+/// post — an out-of-character refusal that must never be published. These
+/// phrases never occur in a genuine kid-voice rewrite.
+pub fn looks_like_refusal(text: &str) -> bool {
+    let t = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "nothing to rewrite",
+        "to rewrite from",
+        "no text to rewrite",
+        "no text content",
+        "no text in post",
+        "no text in that post",
+        "no text to work with",
+        "no post content",
+        "no post text",
+        "no content to rewrite",
+        "no content in post",
+        "paste the actual",
+        "paste actual post",
+        "paste actual text",
+        "paste actual content",
+        "need actual post",
+        "need actual content",
+        "need the actual",
+        "i'll rewrite it",
+        "i'll do it",
+        "no quote, no content",
+        "didn't read",
+        "post fully redacted",
+        "post content missing",
+        "post is only",
+        "post is url only",
+        "post = bare",
+        "post = url",
+        "original post empty",
+        "bare url",
+        "bare rt",
+        "no headline",
+    ];
+    MARKERS.iter().any(|m| t.contains(m))
+}
+
 fn default_model() -> String {
     "claude-opus-4-6".to_string()
 }
