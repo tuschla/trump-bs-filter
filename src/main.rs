@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use futures::stream::{self, StreamExt};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use publisher::Publisher;
 use transformer::Pipeline;
@@ -195,7 +195,14 @@ async fn transform(
             concurrency
         );
 
-        let results: Vec<_> = stream::iter(untransformed.iter().map(|truth| {
+        let (rewritable, skipped): (Vec<_>, Vec<_>) = untransformed
+            .iter()
+            .partition(|t| transformer::content_is_rewritable(&t.content));
+        for t in &skipped {
+            info!("[{}] skipping no-content post: {}", pipeline.name, t.id);
+        }
+
+        let results: Vec<_> = stream::iter(rewritable.iter().map(|truth| {
             let pipeline_name = &pipeline.name;
             async move {
                 let memory = storage
@@ -211,6 +218,14 @@ async fn transform(
 
                 match pipeline.run(&truth.content, &memory).await {
                     Ok(rewritten) => {
+                        if transformer::looks_like_refusal(&rewritten) {
+                            warn!(
+                                "[{pipeline_name}] discarding out-of-character refusal for {}: {}",
+                                truth.id,
+                                rewritten.chars().take(80).collect::<String>()
+                            );
+                            return;
+                        }
                         if let Err(e) = storage
                             .insert_rewrite(&truth.id, pipeline_name, &rewritten)
                             .await
