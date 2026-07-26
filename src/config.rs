@@ -19,10 +19,26 @@ pub struct FeedConfig {
     pub url: String,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
+    /// "truthsocial" polls Truth Social's API directly (near-zero mirror lag);
+    /// anything else falls back to the trumpstruth.org RSS feed at `url`.
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Truth Social account id to poll when source = "truthsocial".
+    #[serde(default)]
+    pub truthsocial_account_id: Option<String>,
+    /// Only ingest posts strictly newer than this RFC3339 instant. Guards the
+    /// source switchover: posts already in the DB under trumpstruth ids must not
+    /// re-enter under Truth Social ids and double-publish.
+    #[serde(default)]
+    pub cutover_rfc3339: Option<String>,
 }
 
 fn default_poll_interval() -> u64 {
     300
+}
+
+fn default_source() -> String {
+    "trumpstruth".to_string()
 }
 
 #[derive(Debug, Deserialize)]

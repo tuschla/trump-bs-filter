@@ -1,6 +1,15 @@
 [feed]
 url = "https://trumpstruth.org/feed"
 poll_interval_secs = 300
+# source = "truthsocial" polls Truth Social's API directly (near-zero mirror lag,
+# real post times) instead of the trumpstruth.org RSS mirror. Anything else uses
+# the RSS feed at `url`.
+# source = "truthsocial"
+# truthsocial_account_id = "107780257626128497"  # realDonaldTrump
+# Only ingest posts strictly newer than this RFC3339 instant. Set to the newest
+# post already in the DB when switching sources so nothing double-publishes under
+# the new id scheme.
+# cutover_rfc3339 = "2026-07-26T13:46:25Z"
 
 [storage]
 db_path = "/data/truths.db"
