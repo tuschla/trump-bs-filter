@@ -12,6 +12,60 @@ pub struct Truth {
     pub url: Option<String>,
 }
 
+/// Poll Truth Social's own API for an account's recent statuses. This bypasses
+/// the trumpstruth.org mirror (~160s of lag) and reports the real post time, so
+/// end-to-end latency drops to poll + transform + publish. The statuses endpoint
+/// 403s without a browser-like Referer; these headers are what unlock it.
+pub async fn fetch_truths_ts(client: &reqwest::Client, account_id: &str) -> Result<Vec<Truth>> {
+    use reqwest::header::{ACCEPT, REFERER, USER_AGENT};
+
+    let url = format!(
+        "https://truthsocial.com/api/v1/accounts/{account_id}/statuses?exclude_replies=true&limit=40"
+    );
+    let items: Vec<serde_json::Value> = client
+        .get(&url)
+        .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .header(ACCEPT, "application/json, text/plain, */*")
+        .header(REFERER, "https://truthsocial.com/@realDonaldTrump")
+        .send()
+        .await
+        .context("failed to fetch Truth Social statuses")?
+        .error_for_status()
+        .context("Truth Social statuses request failed")?
+        .json()
+        .await
+        .context("failed to parse Truth Social statuses JSON")?;
+
+    let truths = items
+        .into_iter()
+        .filter_map(|s| {
+            // Canonical permalink doubles as the stable primary key and source URL.
+            let id = s.get("url").and_then(|v| v.as_str())?.to_string();
+
+            let raw = s.get("content").and_then(|v| v.as_str()).unwrap_or_default();
+            let content = strip_html_tags(&html_escape::decode_html_entities(raw).into_owned());
+            if content.is_empty() {
+                return None;
+            }
+
+            let published = s
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|d| d.with_timezone(&Utc));
+
+            Some(Truth {
+                id: id.clone(),
+                content,
+                published,
+                url: Some(id),
+            })
+        })
+        .collect();
+
+    Ok(truths)
+}
+
 pub async fn fetch_truths(client: &reqwest::Client, feed_url: &str) -> Result<Vec<Truth>> {
     let body = client
         .get(feed_url)

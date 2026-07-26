@@ -151,10 +151,33 @@ async fn fetch(
     config: &config::Config,
     storage: &storage::Storage,
 ) -> Result<()> {
-    let truths = fetcher::fetch_truths(http, &config.feed.url).await?;
+    let truths = if config.feed.source == "truthsocial" {
+        let account_id = config
+            .feed
+            .truthsocial_account_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("source=truthsocial requires feed.truthsocial_account_id"))?;
+        fetcher::fetch_truths_ts(http, account_id).await?
+    } else {
+        fetcher::fetch_truths(http, &config.feed.url).await?
+    };
     info!("fetched {} truths from feed", truths.len());
 
+    // Cutover guard: skip anything at/before the switchover instant so posts
+    // already stored under trumpstruth ids don't re-publish under Truth Social ids.
+    let cutover = config
+        .feed
+        .cutover_rfc3339
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+
     for truth in &truths {
+        if let (Some(cut), Some(published)) = (cutover, truth.published) {
+            if published <= cut {
+                continue;
+            }
+        }
         if storage.truth_exists(&truth.id).await? {
             continue;
         }
