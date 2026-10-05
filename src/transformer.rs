@@ -15,6 +15,12 @@ pub struct Pipeline {
     pub name: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Reasoning effort per model call. Measured on this task (n=3): "high" spent
+    /// 2874 thinking tokens and 67s versus 76 tokens and 22s at "low", for
+    /// indistinguishable 3-sentence output. Styling a short post needs no
+    /// deliberation, so anything above "low" is burnt budget.
+    #[serde(default = "default_effort")]
+    pub effort: String,
     /// Pipelines that cite sources (e.g. no_bs) keep URLs; everything else has
     /// URLs and em/en dashes stripped from the final output.
     #[serde(default)]
@@ -126,8 +132,15 @@ pub fn looks_like_refusal(text: &str) -> bool {
     MARKERS.iter().any(|m| t.contains(m))
 }
 
+/// Budget-safe default: the three prompts that set no `model` would otherwise
+/// silently run on Opus at ~2.5x the cost for output measurably indistinguishable
+/// on styling work. A pipeline that genuinely needs Opus opts in with `model =`.
 fn default_model() -> String {
-    "claude-opus-4-6".to_string()
+    "claude-sonnet-5".to_string()
+}
+
+fn default_effort() -> String {
+    "low".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,7 +183,7 @@ impl Pipeline {
                 let mut retries = 0;
                 loop {
                     let user_message = build_message(original_post, &stage_outputs, memory);
-                    let audit_result = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model).await?;
+                    let audit_result = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model, &self.effort).await?;
 
                     if audit_result.trim() == "PASS" {
                         info!("[{}] audit passed for stage '{}'", self.name, audited_stage_name);
@@ -203,6 +216,7 @@ impl Pipeline {
                         &retry_message,
                         audited_stage.web_search,
                         &self.model,
+                        &self.effort,
                     )
                     .await?;
 
@@ -212,7 +226,7 @@ impl Pipeline {
                 }
             } else {
                 let user_message = build_message(original_post, &stage_outputs, memory);
-                let output = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model).await?;
+                let output = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model, &self.effort).await?;
                 info!("[{}] completed stage '{}'", self.name, stage.name);
                 stage_outputs.push((&stage.name, output));
             }

@@ -1,7 +1,11 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use quick_xml::Reader;
+use quick_xml::events::Event;
 use scraper::{Html, Selector};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::storage::Storage;
 
@@ -76,7 +80,15 @@ pub async fn fetch_truths(client: &reqwest::Client, feed_url: &str) -> Result<Ve
         .await
         .context("failed to read RSS response body")?;
 
+    let originals = extract_original_urls(&body);
     let feed = feed_rs::parser::parse(&body[..]).context("failed to parse RSS feed")?;
+
+    if !feed.entries.is_empty() && originals.is_empty() {
+        warn!(
+            "mirror feed carried no truth:originalUrl elements; falling back to mirror ids, \
+             which cannot be reconciled with Truth Social ids and may double-publish"
+        );
+    }
 
     let truths = feed
         .entries
@@ -95,16 +107,112 @@ pub async fn fetch_truths(client: &reqwest::Client, feed_url: &str) -> Result<Ve
                 return None;
             }
 
+            // Prefer the canonical Truth Social permalink. Both ingest paths then
+            // share one primary key, so a post already stored from the API is not
+            // re-inserted (and re-published) under a mirror id.
+            let id = originals
+                .get(&entry.id)
+                .cloned()
+                .unwrap_or_else(|| entry.id.clone());
+
             Some(Truth {
-                id: entry.id,
                 content,
                 published: entry.published.map(|d| d.with_timezone(&Utc)),
-                url: entry.links.first().map(|l| l.href.clone()),
+                url: Some(id.clone()),
+                id,
             })
         })
         .collect();
 
     Ok(truths)
+}
+
+/// Which element's text we are currently accumulating inside an `<item>`.
+enum ItemField {
+    Link,
+    Guid,
+    Original,
+}
+
+/// Map a mirror item's own link/guid to the canonical Truth Social permalink that
+/// trumpstruth.org publishes as `<truth:originalUrl>`.
+///
+/// feed-rs 2.x drops namespaced extension elements entirely, so the raw XML is
+/// scanned separately rather than replacing a parser that already handles the
+/// feed's date and CDATA quirks. Both link and guid are keyed because feed-rs
+/// derives `entry.id` from whichever the feed supplies.
+fn extract_original_urls(xml: &[u8]) -> HashMap<String, String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut map = HashMap::new();
+
+    let mut link: Option<String> = None;
+    let mut guid: Option<String> = None;
+    let mut original: Option<String> = None;
+    let mut field: Option<ItemField> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                field = match e.name().as_ref() {
+                    // Entering an item discards any channel-level link already seen.
+                    b"item" => {
+                        link = None;
+                        guid = None;
+                        original = None;
+                        None
+                    }
+                    b"link" => Some(ItemField::Link),
+                    b"guid" => Some(ItemField::Guid),
+                    b"truth:originalUrl" => Some(ItemField::Original),
+                    _ => None,
+                };
+            }
+            Ok(Event::Text(t)) => {
+                if let Some(f) = &field {
+                    let text = t.unescape().unwrap_or_default().trim().to_string();
+                    if !text.is_empty() {
+                        match f {
+                            ItemField::Link => link = Some(text),
+                            ItemField::Guid => guid = Some(text),
+                            ItemField::Original => original = Some(text),
+                        }
+                    }
+                }
+            }
+            Ok(Event::CData(t)) => {
+                if let Some(f) = &field {
+                    let text = String::from_utf8_lossy(&t).trim().to_string();
+                    if !text.is_empty() {
+                        match f {
+                            ItemField::Link => link = Some(text),
+                            ItemField::Guid => guid = Some(text),
+                            ItemField::Original => original = Some(text),
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                if e.name().as_ref() == b"item" {
+                    if let Some(canonical) = original.take() {
+                        for key in [link.take(), guid.take()].into_iter().flatten() {
+                            map.insert(key, canonical.clone());
+                        }
+                    }
+                }
+                field = None;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                warn!("mirror feed XML scan stopped early: {e}");
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    map
 }
 
 const BASE_URL: &str = "https://trumpstruth.org";
@@ -354,4 +462,51 @@ fn strip_html_tags(input: &str) -> String {
         }
     }
     output.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mirror keys posts by its own status id while the API keys them by the
+    /// canonical Truth Social permalink. If this mapping regresses, a fallback
+    /// fetch re-inserts posts already stored from the API and publishes them a
+    /// second time to a live account, so each branch is pinned.
+    #[test]
+    fn maps_mirror_ids_to_canonical_truth_social_urls() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:truth="https://truthsocial.com/ns">
+  <channel>
+    <link><![CDATA[https://trumpstruth.org/feed]]></link>
+    <item>
+      <link>https://trumpstruth.org/statuses/41657</link>
+      <guid>https://trumpstruth.org/statuses/41657</guid>
+      <pubDate>Wed, 09 Sep 2026 13:41:33 +0000</pubDate>
+      <truth:originalUrl>https://truthsocial.com/@realDonaldTrump/117241367309466443</truth:originalUrl>
+      <truth:originalId>117241367309466443</truth:originalId>
+    </item>
+    <item>
+      <link>https://trumpstruth.org/statuses/41000</link>
+      <guid>https://trumpstruth.org/statuses/41000</guid>
+    </item>
+  </channel>
+</rss>"#;
+
+        let map = extract_original_urls(xml);
+
+        assert_eq!(
+            map.get("https://trumpstruth.org/statuses/41657").map(String::as_str),
+            Some("https://truthsocial.com/@realDonaldTrump/117241367309466443"),
+            "item link must resolve to the canonical permalink"
+        );
+
+        // An item lacking the extension must be absent rather than mapped to
+        // something wrong: callers then keep the mirror id, which is merely
+        // degraded, not a duplicate under a second identity.
+        assert!(!map.contains_key("https://trumpstruth.org/statuses/41000"));
+
+        // The channel's own <link> precedes the items; it must never be treated
+        // as an item and inherit the first item's permalink.
+        assert!(!map.contains_key("https://trumpstruth.org/feed"));
+    }
 }
