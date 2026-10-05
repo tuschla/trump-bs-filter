@@ -2,4 +2,5 @@ target/
 data/
 *.db
 config.toml
+.env
 .git/

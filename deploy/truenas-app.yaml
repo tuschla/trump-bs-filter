@@ -1,0 +1,61 @@
+# TrueNAS SCALE: Apps -> Discover -> ⋮ -> Install via YAML. Paste this file.
+#
+# Before pasting:
+#  1. Create dataset /mnt/tank/apps/trump (replace "tank" below with your pool),
+#     owned by the "apps" user (568:568), containing:
+#       config.toml   copied from the desktop project
+#       prompts/      the prompts submodule checkout
+#       data/         copy of data/truths.db (stop trump-daemon on the desktop
+#                     first so the file is consistent and nothing double-posts)
+#       headroom/     empty
+#  2. Fill in the two FILL_ME values. They are stored in the app config,
+#     readable by NAS admins only.
+#
+# Same services as ../docker-compose.yml; that file is the source of truth for
+# what each service does. Keep the two in sync.
+
+services:
+  headroom:
+    image: ghcr.io/headroomlabs-ai/headroom:0.37.0-nonroot
+    user: "568:568"
+    environment:
+      HOME: /home/nonroot
+    volumes:
+      - /mnt/tank/apps/trump/headroom:/home/nonroot/.headroom
+    restart: unless-stopped
+
+  daemon:
+    image: ghcr.io/tuschla/trump-bs-filter:latest
+    user: "568:568"
+    command: ["daemon"]
+    environment:
+      ANTHROPIC_BASE_URL: http://headroom:8787
+      CLAUDE_CODE_OAUTH_TOKEN: FILL_ME_sk-ant-oat01-token-from-claude-setup-token
+      RUST_LOG: non_violent_trump=info
+    volumes:
+      - /mnt/tank/apps/trump/config.toml:/app/config.toml:ro
+      - /mnt/tank/apps/trump/prompts:/app/prompts:ro
+      - /mnt/tank/apps/trump/data:/app/data
+    depends_on:
+      headroom:
+        condition: service_healthy
+    restart: unless-stopped
+
+  health:
+    image: ghcr.io/tuschla/trump-bs-filter:latest
+    user: "568:568"
+    entrypoint:
+      - tini
+      - --
+      - /bin/sh
+      - -c
+      - while :; do check-ingest-health --config /app/config.toml; sleep 600; done
+    environment:
+      NTFY_URL: FILL_ME_https://ntfy.sh/your-unguessable-topic
+      NTFY_TOKEN: ""
+    volumes:
+      - /mnt/tank/apps/trump/config.toml:/app/config.toml:ro
+      - /mnt/tank/apps/trump/data:/app/data
+    depends_on:
+      - daemon
+    restart: unless-stopped
