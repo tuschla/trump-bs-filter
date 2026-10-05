@@ -26,9 +26,13 @@ impl std::error::Error for AuthError {}
 
 fn is_auth_failure(parsed: &ClaudeJsonOutput) -> bool {
     parsed.api_error_status == Some(401)
-        || ["Failed to authenticate", "Invalid API key", "Please run /login"]
-            .iter()
-            .any(|m| parsed.result.contains(m))
+        || [
+            "Failed to authenticate",
+            "Invalid API key",
+            "Please run /login",
+        ]
+        .iter()
+        .any(|m| parsed.result.contains(m))
 }
 
 pub async fn call(
@@ -136,7 +140,11 @@ async fn call_once(
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = if !stderr.is_empty() { &stderr } else { &stdout };
-        bail!("claude CLI exited with {}: {}", output.status, detail.chars().take(500).collect::<String>());
+        bail!(
+            "claude CLI exited with {}: {}",
+            output.status,
+            detail.chars().take(500).collect::<String>()
+        );
     }
 
     let parsed: ClaudeJsonOutput =
@@ -153,7 +161,10 @@ fn parse_rate_limit_wait(msg: &str) -> Option<std::time::Duration> {
     // "resets 11pm", "resets 6:20am", "resets 12:30pm"
     let marker = "resets ";
     let rest = msg.split(marker).nth(1)?;
-    let time_str: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == ':').collect();
+    let time_str: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == ':')
+        .collect();
 
     let (time_part, is_pm) = if time_str.ends_with("pm") {
         (&time_str[..time_str.len() - 2], true)

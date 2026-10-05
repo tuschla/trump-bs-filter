@@ -32,10 +32,7 @@ pub struct Pipeline {
 /// "AI wrote this" tell; URLs have no place in a styled rewrite. Deterministic
 /// so it cannot regress no matter what the model emits.
 pub fn sanitize_output(text: &str) -> String {
-    let dashed = text
-        .replace('—', " ")
-        .replace('–', " ")
-        .replace('―', " ");
+    let dashed = text.replace(['—', '–', '―'], " ");
 
     let kept: Vec<String> = dashed
         .split_whitespace()
@@ -177,16 +174,29 @@ impl Pipeline {
                     .iter()
                     .position(|s| s.name == audited_stage_name)
                     .with_context(|| {
-                        format!("audit stage '{}' references unknown stage '{}'", stage.name, audited_stage_name)
+                        format!(
+                            "audit stage '{}' references unknown stage '{}'",
+                            stage.name, audited_stage_name
+                        )
                     })?;
 
                 let mut retries = 0;
                 loop {
                     let user_message = build_message(original_post, &stage_outputs, memory);
-                    let audit_result = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model, &self.effort).await?;
+                    let audit_result = claude::call(
+                        &stage.prompt,
+                        &user_message,
+                        stage.web_search,
+                        &self.model,
+                        &self.effort,
+                    )
+                    .await?;
 
                     if audit_result.trim() == "PASS" {
-                        info!("[{}] audit passed for stage '{}'", self.name, audited_stage_name);
+                        info!(
+                            "[{}] audit passed for stage '{}'",
+                            self.name, audited_stage_name
+                        );
                         break;
                     }
 
@@ -205,12 +215,8 @@ impl Pipeline {
                     );
 
                     let audited_stage = &self.stages[audited_idx];
-                    let retry_message = build_retry_message(
-                        original_post,
-                        &stage_outputs,
-                        &audit_result,
-                        memory,
-                    );
+                    let retry_message =
+                        build_retry_message(original_post, &stage_outputs, &audit_result, memory);
                     let new_output = claude::call(
                         &audited_stage.prompt,
                         &retry_message,
@@ -220,13 +226,23 @@ impl Pipeline {
                     )
                     .await?;
 
-                    if let Some(entry) = stage_outputs.iter_mut().find(|(name, _)| *name == audited_stage_name) {
+                    if let Some(entry) = stage_outputs
+                        .iter_mut()
+                        .find(|(name, _)| *name == audited_stage_name)
+                    {
                         entry.1 = new_output;
                     }
                 }
             } else {
                 let user_message = build_message(original_post, &stage_outputs, memory);
-                let output = claude::call(&stage.prompt, &user_message, stage.web_search, &self.model, &self.effort).await?;
+                let output = claude::call(
+                    &stage.prompt,
+                    &user_message,
+                    stage.web_search,
+                    &self.model,
+                    &self.effort,
+                )
+                .await?;
                 info!("[{}] completed stage '{}'", self.name, stage.name);
                 stage_outputs.push((&stage.name, output));
             }
@@ -252,9 +268,8 @@ fn format_memory(memory: &[PastRewrite]) -> String {
     if memory.is_empty() {
         return String::new();
     }
-    let mut out = String::from(
-        "\n\nPREVIOUS REWRITES (for tone/style consistency — match this voice):\n",
-    );
+    let mut out =
+        String::from("\n\nPREVIOUS REWRITES (for tone/style consistency — match this voice):\n");
     for (i, past) in memory.iter().enumerate() {
         out.push_str(&format!(
             "\n--- Example {} ---\nOriginal: {}\nRewrite: {}\n",
@@ -315,9 +330,7 @@ fn parse_source_lines(text: &str) -> Vec<SourceLine> {
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("sources:")
-            || trimmed.eq_ignore_ascii_case("sources")
-        {
+        if trimmed.eq_ignore_ascii_case("sources:") || trimmed.eq_ignore_ascii_case("sources") {
             in_sources = true;
             continue;
         }
@@ -413,7 +426,10 @@ async fn validate_urls(text: &str) -> String {
         };
 
         let keywords = extract_keywords(&source.description);
-        let matches = keywords.iter().filter(|kw| page_text.contains(kw.as_str())).count();
+        let matches = keywords
+            .iter()
+            .filter(|kw| page_text.contains(kw.as_str()))
+            .count();
         let threshold = (keywords.len() / 3).max(2);
 
         if matches < threshold {
@@ -440,9 +456,12 @@ async fn validate_urls(text: &str) -> String {
 pub fn load_all(prompts_dir: &Path) -> Result<Vec<Pipeline>> {
     let mut pipelines = Vec::new();
 
-    for entry in std::fs::read_dir(prompts_dir)
-        .with_context(|| format!("failed to read prompts directory: {}", prompts_dir.display()))?
-    {
+    for entry in std::fs::read_dir(prompts_dir).with_context(|| {
+        format!(
+            "failed to read prompts directory: {}",
+            prompts_dir.display()
+        )
+    })? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "toml") {

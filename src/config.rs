@@ -66,7 +66,9 @@ pub struct TransformConfig {
 
 impl Default for TransformConfig {
     fn default() -> Self {
-        Self { concurrency: default_concurrency() }
+        Self {
+            concurrency: default_concurrency(),
+        }
     }
 }
 
