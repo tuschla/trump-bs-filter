@@ -97,13 +97,12 @@ impl super::Publisher for MastodonPublisher {
 }
 
 fn parse_cw(text: &str) -> (Option<String>, String) {
-    if let Some(rest) = text.strip_prefix("CW: ") {
-        if let Some(newline_pos) = rest.find('\n') {
-            let spoiler = rest[..newline_pos].trim().to_string();
-            let body = rest[newline_pos + 1..].trim().to_string();
-            return (Some(spoiler), body);
-        }
+    if let Some(rest) = text.strip_prefix("CW: ")
+        && let Some(newline_pos) = rest.find('\n')
+    {
+        let spoiler = rest[..newline_pos].trim().to_string();
+        let body = rest[newline_pos + 1..].trim().to_string();
+        return (Some(spoiler), body);
     }
     (None, text.to_string())
 }
-

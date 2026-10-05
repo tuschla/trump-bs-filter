@@ -139,11 +139,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn get_recent_rewrites(
-        &self,
-        style: &str,
-        limit: i64,
-    ) -> Result<Vec<PastRewrite>> {
+    pub async fn get_recent_rewrites(&self, style: &str, limit: i64) -> Result<Vec<PastRewrite>> {
         let rows = sqlx::query_as::<_, PastRewrite>(
             "SELECT t.content as original, r.content as rewritten \
              FROM rewrites r \

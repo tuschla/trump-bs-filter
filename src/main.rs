@@ -20,7 +20,10 @@ const AUTH_BACKOFF_MIN: Duration = Duration::from_secs(60);
 const AUTH_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser)]
-#[command(name = "non-violent-trump", about = "Rewrite Trump's truths in kinder language")]
+#[command(
+    name = "non-violent-trump",
+    about = "Rewrite Trump's truths in kinder language"
+)]
 struct Cli {
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
@@ -153,7 +156,8 @@ async fn main() -> Result<()> {
                                  Pausing transforms for {}s",
                                 auth_backoff.as_secs()
                             );
-                            transforms_paused_until = Some(tokio::time::Instant::now() + auth_backoff);
+                            transforms_paused_until =
+                                Some(tokio::time::Instant::now() + auth_backoff);
                             auth_backoff = (auth_backoff * 2).min(AUTH_BACKOFF_MAX);
                         }
                         Err(e) => error!("transform failed: {e:#}"),
@@ -184,7 +188,9 @@ async fn fetch(
             .feed
             .truthsocial_account_id
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("source=truthsocial requires feed.truthsocial_account_id"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("source=truthsocial requires feed.truthsocial_account_id")
+            })?;
         // The API is the low-latency path but is edge-blocked without warning.
         // Degrade to the mirror (~160s lag) rather than going dark; both paths key
         // posts by the canonical Truth Social permalink, so this cannot duplicate.
@@ -213,10 +219,10 @@ async fn fetch(
         .map(|d| d.with_timezone(&chrono::Utc));
 
     for truth in &truths {
-        if let (Some(cut), Some(published)) = (cutover, truth.published) {
-            if published <= cut {
-                continue;
-            }
+        if let (Some(cut), Some(published)) = (cutover, truth.published)
+            && published <= cut
+        {
+            continue;
         }
         if storage.truth_exists(&truth.id).await? {
             continue;
@@ -362,18 +368,17 @@ async fn publish_pending(
                 .get_unpublished(&pipeline.name, p.platform())
                 .await?;
             for rewrite in &unpublished {
-                if let Some(c) = cap {
-                    if posted >= c {
-                        break 'platform;
-                    }
+                if let Some(c) = cap
+                    && posted >= c
+                {
+                    break 'platform;
                 }
-                if interval > 0 {
-                    if let Some(ref last_ts) = last {
-                        if secs_since(last_ts) < interval {
-                            // Too soon; try again next cycle.
-                            break 'platform;
-                        }
-                    }
+                if interval > 0
+                    && let Some(ref last_ts) = last
+                    && secs_since(last_ts) < interval
+                {
+                    // Too soon; try again next cycle.
+                    break 'platform;
                 }
 
                 match p

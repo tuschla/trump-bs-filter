@@ -46,8 +46,11 @@ pub async fn fetch_truths_ts(client: &reqwest::Client, account_id: &str) -> Resu
             // Canonical permalink doubles as the stable primary key and source URL.
             let id = s.get("url").and_then(|v| v.as_str())?.to_string();
 
-            let raw = s.get("content").and_then(|v| v.as_str()).unwrap_or_default();
-            let content = strip_html_tags(&html_escape::decode_html_entities(raw).into_owned());
+            let raw = s
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let content = strip_html_tags(&html_escape::decode_html_entities(raw));
             if content.is_empty() {
                 return None;
             }
@@ -193,11 +196,11 @@ fn extract_original_urls(xml: &[u8]) -> HashMap<String, String> {
                 }
             }
             Ok(Event::End(e)) => {
-                if e.name().as_ref() == b"item" {
-                    if let Some(canonical) = original.take() {
-                        for key in [link.take(), guid.take()].into_iter().flatten() {
-                            map.insert(key, canonical.clone());
-                        }
+                if e.name().as_ref() == b"item"
+                    && let Some(canonical) = original.take()
+                {
+                    for key in [link.take(), guid.take()].into_iter().flatten() {
+                        map.insert(key, canonical.clone());
                     }
                 }
                 field = None;
@@ -375,7 +378,7 @@ pub async fn recover_missing(
             .insert_truth(&id, &content, source_url.as_deref(), published.as_deref())
             .await?;
         recovered += 1;
-        if recovered % 25 == 0 {
+        if recovered.is_multiple_of(25) {
             info!("recover: {recovered} new so far (at id {n})");
         }
     }
@@ -405,29 +408,23 @@ fn extract_date_doc(doc: &Html, meta_sel: &Selector) -> Option<DateTime<Utc>> {
     None
 }
 
-fn extract_post_id(
-    status: &scraper::ElementRef,
-    meta_sel: &Selector,
-) -> Option<(String, String)> {
+fn extract_post_id(status: &scraper::ElementRef, meta_sel: &Selector) -> Option<(String, String)> {
     for el in status.select(meta_sel) {
-        if let Some(href) = el.value().attr("href") {
-            if href.contains("/statuses/") {
-                let url = if href.starts_with("http") {
-                    href.to_string()
-                } else {
-                    format!("{BASE_URL}{href}")
-                };
-                return Some((url.clone(), url));
-            }
+        if let Some(href) = el.value().attr("href")
+            && href.contains("/statuses/")
+        {
+            let url = if href.starts_with("http") {
+                href.to_string()
+            } else {
+                format!("{BASE_URL}{href}")
+            };
+            return Some((url.clone(), url));
         }
     }
     None
 }
 
-fn extract_date(
-    status: &scraper::ElementRef,
-    meta_sel: &Selector,
-) -> Option<DateTime<Utc>> {
+fn extract_date(status: &scraper::ElementRef, meta_sel: &Selector) -> Option<DateTime<Utc>> {
     for el in status.select(meta_sel) {
         let text = el.text().collect::<String>();
         if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%B %e, %Y, %l:%M %p") {
@@ -441,7 +438,7 @@ fn extract_next_cursor(html: &str) -> Option<String> {
     let marker = "cursor=";
     let mut last_cursor = None;
     for segment in html.split(marker).skip(1) {
-        let end = segment.find(|c: char| c == '"' || c == '&' || c == '\'').unwrap_or(segment.len());
+        let end = segment.find(['"', '&', '\'']).unwrap_or(segment.len());
         let cursor = &segment[..end];
         if !cursor.is_empty() {
             last_cursor = Some(cursor.to_string());
@@ -495,7 +492,8 @@ mod tests {
         let map = extract_original_urls(xml);
 
         assert_eq!(
-            map.get("https://trumpstruth.org/statuses/41657").map(String::as_str),
+            map.get("https://trumpstruth.org/statuses/41657")
+                .map(String::as_str),
             Some("https://truthsocial.com/@realDonaldTrump/117241367309466443"),
             "item link must resolve to the canonical permalink"
         );
