@@ -7,6 +7,7 @@ use atrium_api::com::atproto::repo::strong_ref::MainData;
 use atrium_api::types::string::Datetime;
 use bsky_sdk::BskyAgent;
 use bsky_sdk::agent::config::Config;
+use tracing::{error, warn};
 
 use crate::config::BlueskyConfig;
 
@@ -14,6 +15,8 @@ const BLUESKY_CHAR_LIMIT: usize = 300;
 
 pub struct BlueskyPublisher {
     agent: BskyAgent,
+    handle: String,
+    password: String,
     max_per_run: Option<usize>,
     min_interval_secs: u64,
 }
@@ -35,9 +38,40 @@ impl BlueskyPublisher {
             .context("failed to login to Bluesky")?;
         Ok(Self {
             agent,
+            handle: config.handle.clone(),
+            password: config.password.clone(),
             max_per_run: config.max_per_run,
             min_interval_secs: config.min_interval_secs,
         })
+    }
+
+    /// Log in again if the agent holds no session. When a token refresh is
+    /// rejected (e.g. 401 AuthMissing) the SDK drops the session for good, and
+    /// every later call fails with "not logged in" until the process restarts:
+    /// that stalled publishing for six days on 2026-09-28.
+    async fn ensure_session(&self) -> Result<()> {
+        if self.agent.get_session().await.is_none() {
+            warn!("Bluesky session lost, logging in again");
+            self.agent
+                .login(&self.handle, &self.password)
+                .await
+                .context("failed to re-login to Bluesky")?;
+        }
+        Ok(())
+    }
+
+    /// Remove records already created for a thread whose later chunks failed.
+    ///
+    /// Reverse order so a reader never sees a reply whose parent is gone.
+    async fn rollback(&self, uris: &[String]) {
+        for uri in uris.iter().rev() {
+            match self.agent.delete_record(uri).await {
+                Ok(_) => warn!("rolled back partial Bluesky thread post {uri}"),
+                Err(e) => {
+                    error!("orphaned partial Bluesky post {uri}, delete failed: {e}")
+                }
+            }
+        }
     }
 }
 
@@ -65,9 +99,12 @@ impl super::Publisher for BlueskyPublisher {
             .and_then(|ts| ts.parse::<Datetime>().ok())
             .unwrap_or_else(Datetime::now);
         Box::pin(async move {
+            self.ensure_session().await?;
             let chunks = super::split_into_chunks(&status, BLUESKY_CHAR_LIMIT);
             let mut root_ref: Option<(String, atrium_api::types::string::Cid)> = None;
             let mut parent_ref: Option<(String, atrium_api::types::string::Cid)> = None;
+            // URIs of chunks already accepted, so a mid-thread failure can be undone.
+            let mut posted: Vec<String> = Vec::new();
 
             for chunk in &chunks {
                 let reply = parent_ref.as_ref().map(|(parent_uri, parent_cid)| {
@@ -87,7 +124,7 @@ impl super::Publisher for BlueskyPublisher {
                     .into()
                 });
 
-                let response = self
+                let response = match self
                     .agent
                     .create_record(RecordData {
                         created_at: timestamp.clone(),
@@ -101,10 +138,20 @@ impl super::Publisher for BlueskyPublisher {
                         tags: None,
                     })
                     .await
-                    .context("failed to post to Bluesky")?;
+                {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // Half a thread would otherwise sit on the account forever:
+                        // the publication is never marked, so the next cycle posts
+                        // the whole thread again. Undo what landed, then fail.
+                        self.rollback(&posted).await;
+                        return Err(anyhow::Error::new(e).context("failed to post to Bluesky"));
+                    }
+                };
 
                 let uri = response.uri.clone();
                 let cid = response.cid.clone();
+                posted.push(uri.clone());
 
                 if root_ref.is_none() {
                     root_ref = Some((uri.clone(), cid.clone()));

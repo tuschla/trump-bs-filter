@@ -16,7 +16,6 @@ pub struct PastRewrite {
 pub struct UntransformedTruth {
     pub id: String,
     pub content: String,
-    pub published: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -69,6 +68,20 @@ impl Storage {
                 published_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (truth_id, style, platform),
                 FOREIGN KEY (truth_id) REFERENCES truths(id)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Without this, posts carrying no rewritable text are re-selected on every
+        // poll and re-evaluated and re-logged forever (~33k log lines/hour at a 15s
+        // interval), and the work is never retired.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transform_skips (
+                truth_id TEXT NOT NULL REFERENCES truths(id),
+                style TEXT NOT NULL,
+                skipped_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (truth_id, style)
             )",
         )
         .execute(&pool)
@@ -166,20 +179,40 @@ impl Storage {
 
     pub async fn get_untransformed(&self, style: &str) -> Result<Vec<UntransformedTruth>> {
         let rows = sqlx::query_as::<_, UntransformedTruth>(
-            "SELECT t.id, t.content, t.published \
+            "SELECT t.id, t.content \
              FROM truths t \
              WHERE NOT EXISTS (
                  SELECT 1 FROM rewrites r
                  WHERE r.truth_id = t.id AND r.style = ?
+             ) \
+             AND NOT EXISTS (
+                 SELECT 1 FROM transform_skips s
+                 WHERE s.truth_id = t.id AND s.style = ?
              ) \
              AND TRIM(t.content) != '' \
              AND NOT (TRIM(t.content) GLOB 'http*' AND INSTR(TRIM(t.content), ' ') = 0) \
              ORDER BY t.published ASC",
         )
         .bind(style)
+        .bind(style)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    /// Record that a post carries nothing rewritable, so later cycles stop
+    /// re-reading and re-logging it. `content_is_rewritable` is deterministic and a
+    /// truth's content never changes, so the decision is permanent.
+    ///
+    /// If that filter is ever loosened, clear this table to re-evaluate the
+    /// skipped posts: DELETE FROM transform_skips;
+    pub async fn mark_transform_skipped(&self, truth_id: &str, style: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO transform_skips (truth_id, style) VALUES (?, ?)")
+            .bind(truth_id)
+            .bind(style)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Most recent publication time for a platform (UTC "YYYY-MM-DD HH:MM:SS"),

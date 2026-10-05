@@ -1739,6 +1739,7 @@ dependencies = [
  "futures",
  "html-escape",
  "megalodon",
+ "quick-xml",
  "reqwest",
  "scraper",
  "serde",

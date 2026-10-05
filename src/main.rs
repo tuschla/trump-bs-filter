@@ -8,13 +8,16 @@ mod transformer;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, TryStreamExt};
 use tracing::{error, info, warn};
 
 use publisher::Publisher;
 use transformer::Pipeline;
+
+const AUTH_BACKOFF_MIN: Duration = Duration::from_secs(60);
+const AUTH_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser)]
 #[command(name = "non-violent-trump", about = "Rewrite Trump's truths in kinder language")]
@@ -60,7 +63,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load(&cli.config)?;
     let storage = storage::Storage::open(&config.storage.db_path).await?;
-    let http = reqwest::Client::new();
+    // rustls, not the default native-tls: Truth Social's edge rejects the OpenSSL
+    // ClientHello fingerprint with a 403 no matter what headers are sent, while
+    // the rustls handshake negotiated up to h2 is accepted.
+    let http = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .context("failed to build HTTP client")?;
 
     let prompts_dir = Path::new(&config.prompts.dir);
     let all_pipelines = transformer::load_all(prompts_dir)?;
@@ -124,12 +133,31 @@ async fn main() -> Result<()> {
             let interval = Duration::from_secs(config.feed.poll_interval_secs);
             let publishers = create_publishers(&config).await?;
             info!("starting daemon, polling every {}s", interval.as_secs());
+            // Fetch and publish keep running while transforms wait out an auth
+            // outage; the pause doubles so a dead login is probed, not hammered.
+            let mut auth_backoff = AUTH_BACKOFF_MIN;
+            let mut transforms_paused_until: Option<tokio::time::Instant> = None;
             loop {
                 if let Err(e) = fetch(&http, &config, &storage).await {
                     error!("fetch failed: {e:#}");
                 }
-                if let Err(e) = transform(&config, &storage, &pipelines).await {
-                    error!("transform failed: {e:#}");
+                if transforms_paused_until.is_none_or(|t| tokio::time::Instant::now() >= t) {
+                    match transform(&config, &storage, &pipelines).await {
+                        Ok(()) => {
+                            transforms_paused_until = None;
+                            auth_backoff = AUTH_BACKOFF_MIN;
+                        }
+                        Err(e) if e.downcast_ref::<claude::AuthError>().is_some() => {
+                            error!(
+                                "{e:#}; run `claude auth login` or set CLAUDE_CODE_OAUTH_TOKEN. \
+                                 Pausing transforms for {}s",
+                                auth_backoff.as_secs()
+                            );
+                            transforms_paused_until = Some(tokio::time::Instant::now() + auth_backoff);
+                            auth_backoff = (auth_backoff * 2).min(AUTH_BACKOFF_MAX);
+                        }
+                        Err(e) => error!("transform failed: {e:#}"),
+                    }
                 }
                 if let Err(e) = publish_pending(&storage, &pipelines, &publishers).await {
                     error!("publish failed: {e:#}");
@@ -157,7 +185,19 @@ async fn fetch(
             .truthsocial_account_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("source=truthsocial requires feed.truthsocial_account_id"))?;
-        fetcher::fetch_truths_ts(http, account_id).await?
+        // The API is the low-latency path but is edge-blocked without warning.
+        // Degrade to the mirror (~160s lag) rather than going dark; both paths key
+        // posts by the canonical Truth Social permalink, so this cannot duplicate.
+        match fetcher::fetch_truths_ts(http, account_id).await {
+            Ok(truths) => truths,
+            Err(e) => {
+                warn!(
+                    "Truth Social API fetch failed, falling back to {}: {e:#}",
+                    config.feed.url
+                );
+                fetcher::fetch_truths(http, &config.feed.url).await?
+            }
+        }
     } else {
         fetcher::fetch_truths(http, &config.feed.url).await?
     };
@@ -222,53 +262,62 @@ async fn transform(
             .iter()
             .partition(|t| transformer::content_is_rewritable(&t.content));
         for t in &skipped {
-            info!("[{}] skipping no-content post: {}", pipeline.name, t.id);
+            // Persist the verdict so this post is not re-read and re-logged on every
+            // subsequent poll; on failure it simply gets reconsidered next cycle.
+            match storage.mark_transform_skipped(&t.id, &pipeline.name).await {
+                Ok(()) => info!("[{}] skipping no-content post: {}", pipeline.name, t.id),
+                Err(e) => error!(
+                    "[{}] failed to record skip for {}: {e:#}",
+                    pipeline.name, t.id
+                ),
+            }
         }
 
-        let results: Vec<_> = stream::iter(rewritable.iter().map(|truth| {
-            let pipeline_name = &pipeline.name;
-            async move {
-                let memory = storage
-                    .get_recent_rewrites(pipeline_name, transformer::MEMORY_EXAMPLE_COUNT)
-                    .await;
-                let memory = match memory {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!("[{pipeline_name}] failed to get memory for {}: {e:#}", truth.id);
-                        return;
-                    }
-                };
+        // Per-post failures are logged and left for the next cycle; only an auth
+        // failure (which every remaining post would repeat) aborts the batch.
+        stream::iter(rewritable.iter().map(Ok::<_, anyhow::Error>))
+            .try_for_each_concurrent(concurrency, |truth| {
+                let pipeline_name = &pipeline.name;
+                async move {
+                    let memory = match storage
+                        .get_recent_rewrites(pipeline_name, transformer::MEMORY_EXAMPLE_COUNT)
+                        .await
+                    {
+                        Ok(m) => m,
+                        Err(e) => {
+                            error!("[{pipeline_name}] failed to get memory for {}: {e:#}", truth.id);
+                            return Ok(());
+                        }
+                    };
 
-                match pipeline.run(&truth.content, &memory).await {
-                    Ok(rewritten) => {
-                        if transformer::looks_like_refusal(&rewritten) {
-                            warn!(
-                                "[{pipeline_name}] discarding out-of-character refusal for {}: {}",
-                                truth.id,
-                                rewritten.chars().take(80).collect::<String>()
-                            );
-                            return;
+                    match pipeline.run(&truth.content, &memory).await {
+                        Ok(rewritten) => {
+                            if transformer::looks_like_refusal(&rewritten) {
+                                warn!(
+                                    "[{pipeline_name}] discarding out-of-character refusal for {}: {}",
+                                    truth.id,
+                                    rewritten.chars().take(80).collect::<String>()
+                                );
+                                return Ok(());
+                            }
+                            if let Err(e) = storage
+                                .insert_rewrite(&truth.id, pipeline_name, &rewritten)
+                                .await
+                            {
+                                error!("[{pipeline_name}] failed to store rewrite for {}: {e:#}", truth.id);
+                            } else {
+                                info!("transformed [{pipeline_name}]: {}", truth.id);
+                            }
                         }
-                        if let Err(e) = storage
-                            .insert_rewrite(&truth.id, pipeline_name, &rewritten)
-                            .await
-                        {
-                            error!("[{pipeline_name}] failed to store rewrite for {}: {e:#}", truth.id);
-                        } else {
-                            info!("transformed [{pipeline_name}]: {}", truth.id);
+                        Err(e) if e.downcast_ref::<claude::AuthError>().is_some() => return Err(e),
+                        Err(e) => {
+                            error!("[{pipeline_name}] transform failed for {}: {e:#}", truth.id);
                         }
                     }
-                    Err(e) => {
-                        error!("[{pipeline_name}] transform failed for {}: {e:#}", truth.id);
-                    }
+                    Ok(())
                 }
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
-
-        let _ = results;
+            })
+            .await?;
     }
 
     Ok(())
