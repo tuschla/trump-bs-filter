@@ -1,11 +1,60 @@
+# Secrets come from .env next to this file (gitignored):
+#   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   (from `claude setup-token`)
+#   NTFY_URL=https://ntfy.sh/<unguessable-topic>
+#   NTFY_TOKEN=                                 (only for a protected topic)
+# config.toml (Bluesky app password) and prompts/ are mounted read-only.
+#
+# All services run as one uid that must own ./data and ./headroom; override
+# with APP_UID/APP_GID (TrueNAS apps default to 568).
+
+x-app-user: &app-user "${APP_UID:-1000}:${APP_GID:-1000}"
+
 services:
-  non-violent-trump:
+  headroom:
+    image: ghcr.io/headroomlabs-ai/headroom:0.37.0-nonroot
+    user: *app-user
+    environment:
+      HOME: /home/nonroot
+    volumes:
+      - ./headroom:/home/nonroot/.headroom
+    restart: unless-stopped
+    # Image ships a HEALTHCHECK against /readyz; the daemon waits on it.
+
+  daemon:
     build: .
+    image: ghcr.io/tuschla/trump-bs-filter:latest
+    user: *app-user
+    command: ["daemon"]
+    environment:
+      ANTHROPIC_BASE_URL: http://headroom:8787
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN in .env}
+      RUST_LOG: non_violent_trump=info
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./prompts:/app/prompts:ro
-      - ./data:/data
+      - ./data:/app/data
+    depends_on:
+      headroom:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Separate container on purpose: a monitor sharing the daemon's fate cannot
+  # report the daemon's death. Alerts go to ntfy on state changes only.
+  health:
+    image: ghcr.io/tuschla/trump-bs-filter:latest
+    user: *app-user
+    entrypoint:
+      - tini
+      - --
+      - /bin/sh
+      - -c
+      - while :; do check-ingest-health --config /app/config.toml; sleep 600; done
     environment:
-      - RUST_LOG=non_violent_trump=info
-    command: ["daemon", "--config", "/app/config.toml"]
+      NTFY_URL: ${NTFY_URL:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./data:/app/data
+    depends_on:
+      - daemon
     restart: unless-stopped

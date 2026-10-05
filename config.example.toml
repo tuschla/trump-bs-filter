@@ -12,7 +12,9 @@ poll_interval_secs = 300
 # cutover_rfc3339 = "2026-07-26T13:46:25Z"
 
 [storage]
-db_path = "/data/truths.db"
+# Relative to the working directory: the project dir on a host, /app in the
+# container (where ./data is mounted at /app/data).
+db_path = "data/truths.db"
 
 [prompts]
 dir = "prompts"

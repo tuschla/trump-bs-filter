@@ -4,3 +4,4 @@ data/
 config.toml
 .claude/
 dry_run_results.txt
+.env
